@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Text;
 
 
@@ -9,51 +8,35 @@ namespace Sort
 {
     class Program
     {
-        static RecordComparer recordComparer = new();
-        static List<Record> buffer = new List<Record>(1_000_000);
-        static Queue<string> bufferFileQueue = new();
-        static long bufferSize;
-        static string path;
-        static string outputPath;
-
         static void Main(string[] args)
         {
             // TODO: check args
 
-            path = args[0];
-            bufferSize = long.Parse(args[1]);
-            outputPath = args[2];
+            var comparer = new RecordComparer();
+            var path = args[0];
+            var outputPath = args[1];
+            var bufferFileQueue = new Queue<string>();
+            var bufferSize = args.Length > 2 ? int.Parse(args[2]) : 1024 * 1024 * 64;
 
             Console.WriteLine("Sorting stage 1 (split) ...");
 
             // Stage 1 - split file into small sorted parts
-            // Read file line by line, when buffer is filled sort it and write to the disk.
-            // Then fill, sort and write next portion.
 
             using (var file = File.OpenText(path))
             {
-                while (file.BaseStream.Position < file.BaseStream.Length)
+                var buffer = new char[bufferSize];
+                var records = new List<Record>(1000000);
+                var rest = new char[0];
+
+                while (Read(records, file, buffer, ref rest))
                 {
-                    buffer.Add(ReadLine(file));
-
-                    if (file.BaseStream.Position > bufferSize * (bufferFileQueue.Count + 1))
-                    {
-                        FlushBuffer();
-                    }
+                    bufferFileQueue.Enqueue(SortAndSave(records, comparer, outputPath));
                 }
-            }
-
-            // flush the rest of data
-            if (buffer.Any())
-            {
-                FlushBuffer();
             }
 
             // Stage 2 - incrementally (pair by pair) merge parts into single sorted file
 
             Console.WriteLine("Sorting stage 2 (merge) ...");
-
-            var bufferFileCount = bufferFileQueue.Count;
 
             while (bufferFileQueue.Count > 1)
             {
@@ -65,28 +48,53 @@ namespace Sort
                 using (var fileToMerge2 = File.OpenText(pathToMerge2))
                 using (var fileMerged = new StreamWriter(pathMerged, false, Encoding.UTF8, 65536))
                 {
-                    var record1 = ReadLine(fileToMerge1);
-                    var record2 = ReadLine(fileToMerge2);
+                    var buffer1 = new char[bufferSize];
+                    var buffer2 = new char[bufferSize];
+                    var records1 = new List<Record>(1000000);
+                    var records2 = new List<Record>(1000000);
+                    var rest1 = new char[0];
+                    var rest2 = new char[0];
 
-                    while (record1 != null || record2 != null)
+                    Read(records1, fileToMerge1, buffer1, ref rest1);
+                    Read(records2, fileToMerge2, buffer2, ref rest2);
+
+                    var enumerator1 = records1.GetEnumerator();
+                    var enumerator2 = records2.GetEnumerator();
+
+                    enumerator1.MoveNext();
+                    enumerator2.MoveNext();
+
+                    while (enumerator1.Current != null || enumerator2.Current != null)
                     {
-                        var comparisonResult = recordComparer.Compare(record1, record2);
+                        var comparisonResult = comparer.Compare(enumerator1.Current, enumerator2.Current);
                         if (comparisonResult < 0)
                         {
-                            WriteLine(record1, fileMerged);
-                            record1 = ReadLine(fileToMerge1);
+                            Write(enumerator1.Current, fileMerged);
+                            enumerator1.MoveNext();
                         }
                         else if (comparisonResult == 0)
                         {
-                            WriteLine(record1, fileMerged);
-                            WriteLine(record2, fileMerged);
-                            record1 = ReadLine(fileToMerge1);
-                            record2 = ReadLine(fileToMerge2);
+                            Write(enumerator1.Current, fileMerged);
+                            Write(enumerator2.Current, fileMerged);
+                            enumerator1.MoveNext();
+                            enumerator2.MoveNext();
                         }
                         else
                         {
-                            WriteLine(record2, fileMerged);
-                            record2 = ReadLine(fileToMerge2);
+                            Write(enumerator2.Current, fileMerged);
+                            enumerator2.MoveNext();
+                        }
+
+                        if (enumerator1.Current == null && Read(records1, fileToMerge1, buffer1, ref rest1))
+                        {
+                            enumerator1 = records1.GetEnumerator();
+                            enumerator1.MoveNext();
+                        }
+
+                        if (enumerator2.Current == null && Read(records2, fileToMerge2, buffer2, ref rest2))
+                        {
+                            enumerator2 = records2.GetEnumerator();
+                            enumerator2.MoveNext();
                         }
                     }
                 }
@@ -102,29 +110,83 @@ namespace Sort
             Console.WriteLine($"Sorted: {bufferFileQueue.Dequeue()}");
         }
 
-        static Record ReadLine(StreamReader reader) =>
-            reader.BaseStream.Position < reader.BaseStream.Length
-                ? new Record(reader.ReadLine())
-                : null;
-
-        static void WriteLine(Record record, StreamWriter writer) => writer.WriteLine(record.ToString());
-
-        static void FlushBuffer()
+        static bool Read(List<Record> records, StreamReader reader, char[] buffer, ref char[] previousReadRest)
         {
-            buffer.Sort(recordComparer);
+            records.Clear();
+
+            if (reader.EndOfStream)
+            {
+                return false;
+            }
+
+            if (previousReadRest != null)
+            {
+                Array.Copy(previousReadRest, 0, buffer, 0, previousReadRest.Length);
+            }
+
+            var readCount = reader.ReadBlock(buffer, previousReadRest.Length, buffer.Length - previousReadRest.Length) + previousReadRest.Length;
+
+            int numIndex = 0;
+            int dotIndex = 0;
+
+            for (int i = 0; i < readCount; i++)
+            {
+                if (buffer[i] == '.')
+                {
+                    dotIndex = i;
+                }
+
+                if (buffer[i] == '\r' || buffer[i] == '\n')
+                {
+                    records.Add(new Record
+                    {
+                        Num = new Memory<char>(buffer, numIndex, dotIndex - numIndex),
+                        Str = new Memory<char>(buffer, dotIndex, i - dotIndex)
+                    });
+
+                    numIndex = ++i;
+
+                    if (numIndex < readCount && (buffer[numIndex] == '\r' || buffer[numIndex] == '\n'))
+                    {
+                        numIndex = ++i;
+                    }
+                }
+            }
+
+            if (numIndex < readCount)
+            {
+                previousReadRest = new char[readCount - numIndex];
+                Array.Copy(buffer, numIndex, previousReadRest, 0, previousReadRest.Length);
+            }
+            else
+            {
+                previousReadRest = new char[0];
+            }
+
+            return true;
+        }
+
+        static void Write(Record record, StreamWriter writer)
+        {
+            writer.Write(record.Num.Span);
+            writer.WriteLine(record.Str.Span);
+        }
+
+        static string SortAndSave(List<Record> records, IComparer<Record> comparer, string outputPath)
+        {
+            records.Sort(comparer);
 
             var tempPath = Path.Combine(outputPath, Path.GetRandomFileName());
 
             using (var writer = new StreamWriter(tempPath, false, Encoding.UTF8, 65536))
             {
-                foreach (var record in buffer)
+                foreach (var record in records)
                 {
-                    WriteLine(record, writer);
+                    Write(record, writer);
                 }
             }
 
-            bufferFileQueue.Enqueue(tempPath);
-            buffer.Clear();
+            return tempPath;
         }
     }
 }
