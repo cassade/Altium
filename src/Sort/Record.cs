@@ -1,29 +1,20 @@
+using System.Collections.Generic;
 using System;
 
 namespace Sort
 {
-    public class Record : IComparable<Record>
+    public class Record
     {
-        public Record()
+        public Record(string line)
         {
+            var parts = line.Split('.');
+            Num = parts[0];
+            Str = parts[1];
         }
 
-        public Record(int num, string str)
-        {
-            Num = num;
-            Str = str;
-        }
+        public string Num;
+        public string Str;
 
-        public int Num { get; }
-        public string Str { get; }
-
-        public int CompareTo(Record other)
-        {
-            var strComparison = Str.CompareTo(other.Str);
-
-            return strComparison == 0
-                ? Num.CompareTo(other.Num)
-                : strComparison;
-        }
+        public override string ToString() => $"{Num}.{Str}";
     }
 }

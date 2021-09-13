@@ -2,24 +2,29 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Threading.Tasks;
+using System.Text;
 
 
 namespace Sort
 {
     class Program
     {
-        static async Task Main(string[] args)
+        static RecordComparer recordComparer = new();
+        static List<Record> buffer = new List<Record>(1_000_000);
+        static Queue<string> bufferFileQueue = new();
+        static long bufferSize;
+        static string path;
+        static string outputPath;
+
+        static void Main(string[] args)
         {
             // TODO: check args
 
-            var path = args[0];
-            var buffer = new SortedSet<Record>();
-            var bufferFileQueue = new Queue<string>();
-            var bufferFileSize = long.Parse(args[1]);
-            var outputPath = args[2];
+            path = args[0];
+            bufferSize = long.Parse(args[1]);
+            outputPath = args[2];
 
-            Console.WriteLine("Sorting:");
+            Console.WriteLine("Sorting stage 1 (split) ...");
 
             // Stage 1 - split file into small sorted parts
             // Read file line by line, when buffer is filled sort it and write to the disk.
@@ -29,28 +34,24 @@ namespace Sort
             {
                 while (file.BaseStream.Position < file.BaseStream.Length)
                 {
-                    var record = await ReadLine(file);
-                    buffer.Add(record); // buffer is sorted automatically, no need to sort explicitly
+                    buffer.Add(ReadLine(file));
 
-                    if (file.BaseStream.Position > bufferFileSize * (bufferFileQueue.Count + 1))
+                    if (file.BaseStream.Position > bufferSize * (bufferFileQueue.Count + 1))
                     {
-                        await FlushBuffer(buffer, outputPath, bufferFileQueue);
+                        FlushBuffer();
                     }
-
-                    var progress = decimal.Divide(file.BaseStream.Position, file.BaseStream.Length) * 100;
-                    Console.Write($"\rSplit: {progress:N0}%");
                 }
             }
 
             // flush the rest of data
             if (buffer.Any())
             {
-                await FlushBuffer(buffer, outputPath, bufferFileQueue);
+                FlushBuffer();
             }
 
-            Console.WriteLine();
-
             // Stage 2 - incrementally (pair by pair) merge parts into single sorted file
+
+            Console.WriteLine("Sorting stage 2 (merge) ...");
 
             var bufferFileCount = bufferFileQueue.Count;
 
@@ -62,38 +63,31 @@ namespace Sort
 
                 using (var fileToMerge1 = File.OpenText(pathToMerge1))
                 using (var fileToMerge2 = File.OpenText(pathToMerge2))
-                using (var fileMerged = File.CreateText(pathMerged))
+                using (var fileMerged = new StreamWriter(pathMerged, false, Encoding.UTF8, 65536))
                 {
-                    var record1 = await ReadLine(fileToMerge1);
-                    var record2 = await ReadLine(fileToMerge2);
+                    var record1 = ReadLine(fileToMerge1);
+                    var record2 = ReadLine(fileToMerge2);
 
                     while (record1 != null || record2 != null)
                     {
-                        var comparisonResult =
-                            record1 != null && record2 == null ? -1 :
-                            record1 == null && record2 != null ? 1 :
-                            record1.CompareTo(record2);
-
+                        var comparisonResult = recordComparer.Compare(record1, record2);
                         if (comparisonResult < 0)
                         {
-                            await WriteLine(record1, fileMerged);
-                            record1 = await ReadLine(fileToMerge1);
+                            WriteLine(record1, fileMerged);
+                            record1 = ReadLine(fileToMerge1);
                         }
                         else if (comparisonResult == 0)
                         {
-                            await WriteLine(record1, fileMerged);
-                            await WriteLine(record2, fileMerged);
-                            record1 = await ReadLine(fileToMerge1);
-                            record2 = await ReadLine(fileToMerge2);
+                            WriteLine(record1, fileMerged);
+                            WriteLine(record2, fileMerged);
+                            record1 = ReadLine(fileToMerge1);
+                            record2 = ReadLine(fileToMerge2);
                         }
                         else
                         {
-                            await WriteLine(record2, fileMerged);
-                            record2 = await ReadLine(fileToMerge2);
+                            WriteLine(record2, fileMerged);
+                            record2 = ReadLine(fileToMerge2);
                         }
-
-                        // Not sure if it's required, default stream buffer should be ok.
-                        // await fileMerged.FlushAsync();
                     }
                 }
 
@@ -103,48 +97,33 @@ namespace Sort
 
                 // add new buffer file to queue to merge it with other parts
                 bufferFileQueue.Enqueue(pathMerged);
-
-                var progress = decimal.Divide(bufferFileCount - bufferFileQueue.Count, bufferFileCount) * 100;
-                Console.Write($"\rMerge: {progress:N0}%");
             }
 
-            // move result near to source file
-            File.Move(bufferFileQueue.Dequeue(), $"{path}.sorted", true);
-
-            Console.Write($"\rMerge: 100%");
-            Console.WriteLine();
-            Console.WriteLine($"Sorted: {path}.sorted");
+            Console.WriteLine($"Sorted: {bufferFileQueue.Dequeue()}");
         }
 
-        static async Task<Record> ReadLine(StreamReader reader)
+        static Record ReadLine(StreamReader reader) =>
+            reader.BaseStream.Position < reader.BaseStream.Length
+                ? new Record(reader.ReadLine())
+                : null;
+
+        static void WriteLine(Record record, StreamWriter writer) => writer.WriteLine(record.ToString());
+
+        static void FlushBuffer()
         {
-            if (reader.BaseStream.Position < reader.BaseStream.Length)
-            {
-                var line = await reader.ReadLineAsync();
-                var recordParts = line.Split('.');
-                return new Record(int.Parse(recordParts[0]), recordParts[1].Trim());
-            }
-            else
-            {
-                return null;
-            }
-        }
+            buffer.Sort(recordComparer);
 
-        static async Task WriteLine(Record record, StreamWriter writer) => await writer.WriteLineAsync($"{record.Num}. {record.Str}");
+            var tempPath = Path.Combine(outputPath, Path.GetRandomFileName());
 
-        static async Task FlushBuffer(ICollection<Record> buffer, string outputPath, Queue<string> bufferFileQueue)
-        {
-            var path = Path.Combine(outputPath, Path.GetRandomFileName());
-
-            using (var writer = File.CreateText(path))
+            using (var writer = new StreamWriter(tempPath, false, Encoding.UTF8, 65536))
             {
                 foreach (var record in buffer)
                 {
-                    await WriteLine(record, writer);
+                    WriteLine(record, writer);
                 }
             }
 
-            bufferFileQueue.Enqueue(path);
+            bufferFileQueue.Enqueue(tempPath);
             buffer.Clear();
         }
     }
