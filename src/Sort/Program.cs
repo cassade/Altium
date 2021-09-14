@@ -1,22 +1,25 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 
 
 namespace Sort
 {
     class Program
     {
-        static void Main(string[] args)
+        static RecordComparer _comparer = new RecordComparer();
+
+        static async Task Main(string[] args)
         {
             // TODO: check args
 
-            var comparer = new RecordComparer();
             var path = args[0];
-            var outputPath = args[1];
-            var bufferFileQueue = new Queue<string>();
+            var outputPath = Directory.CreateDirectory(args[1]).FullName;
             var bufferSize = args.Length > 2 ? int.Parse(args[2]) : 1024 * 1024 * 64;
+            var bufferFiles = new List<string>();
 
             Console.WriteLine("Sorting stage 1 (split) ...");
 
@@ -25,12 +28,18 @@ namespace Sort
             using (var file = File.OpenText(path))
             {
                 var buffer = new char[bufferSize];
-                var records = new List<Record>(1000000);
                 var rest = new char[0];
 
-                while (Read(records, file, buffer, ref rest))
+                while (!file.EndOfStream)
                 {
-                    bufferFileQueue.Enqueue(SortAndSave(records, comparer, outputPath));
+                    var tasks = new List<Task<string>>();
+
+                    for (int threadCount = 0; threadCount < 4 && Read(file, buffer, ref rest, out var records); threadCount++)
+                    {
+                        tasks.Add(Task.Run(() => SortAndSave(records, outputPath)));
+                    }
+
+                    bufferFiles.AddRange(await Task.WhenAll(tasks));
                 }
             }
 
@@ -38,81 +47,34 @@ namespace Sort
 
             Console.WriteLine("Sorting stage 2 (merge) ...");
 
-            while (bufferFileQueue.Count > 1)
+            while (bufferFiles.Count > 1)
             {
-                var pathToMerge1 = bufferFileQueue.Dequeue();
-                var pathToMerge2 = bufferFileQueue.Dequeue();
-                var pathMerged = Path.Combine(outputPath, Path.GetRandomFileName());
+                var tasks = new List<Task<string>>();
+                var threadCount = 0;
 
-                using (var fileToMerge1 = File.OpenText(pathToMerge1))
-                using (var fileToMerge2 = File.OpenText(pathToMerge2))
-                using (var fileMerged = new StreamWriter(pathMerged, false, Encoding.UTF8, 65536))
+                for (int i = bufferFiles.Count - 1; i > 0 && threadCount < 4; i = i - 2)
                 {
-                    var buffer1 = new char[bufferSize];
-                    var buffer2 = new char[bufferSize];
-                    var records1 = new List<Record>(1000000);
-                    var records2 = new List<Record>(1000000);
-                    var rest1 = new char[0];
-                    var rest2 = new char[0];
+                    var fileToMerge1 = bufferFiles[i];
+                    var fileToMerge2 = bufferFiles[i - 1];
 
-                    Read(records1, fileToMerge1, buffer1, ref rest1);
-                    Read(records2, fileToMerge2, buffer2, ref rest2);
+                    tasks.Add(Task.Run(() => Merge(bufferSize, fileToMerge1, fileToMerge2, outputPath)));
 
-                    var enumerator1 = records1.GetEnumerator();
-                    var enumerator2 = records2.GetEnumerator();
-
-                    enumerator1.MoveNext();
-                    enumerator2.MoveNext();
-
-                    while (enumerator1.Current != null || enumerator2.Current != null)
-                    {
-                        var comparisonResult = comparer.Compare(enumerator1.Current, enumerator2.Current);
-                        if (comparisonResult < 0)
-                        {
-                            Write(enumerator1.Current, fileMerged);
-                            enumerator1.MoveNext();
-                        }
-                        else if (comparisonResult == 0)
-                        {
-                            Write(enumerator1.Current, fileMerged);
-                            Write(enumerator2.Current, fileMerged);
-                            enumerator1.MoveNext();
-                            enumerator2.MoveNext();
-                        }
-                        else
-                        {
-                            Write(enumerator2.Current, fileMerged);
-                            enumerator2.MoveNext();
-                        }
-
-                        if (enumerator1.Current == null && Read(records1, fileToMerge1, buffer1, ref rest1))
-                        {
-                            enumerator1 = records1.GetEnumerator();
-                            enumerator1.MoveNext();
-                        }
-
-                        if (enumerator2.Current == null && Read(records2, fileToMerge2, buffer2, ref rest2))
-                        {
-                            enumerator2 = records2.GetEnumerator();
-                            enumerator2.MoveNext();
-                        }
-                    }
+                    bufferFiles.RemoveAt(i);
+                    bufferFiles.RemoveAt(i - 1);
+                    threadCount++;
                 }
 
-                // delete processed buffer files
-                File.Delete(pathToMerge1);
-                File.Delete(pathToMerge2);
-
-                // add new buffer file to queue to merge it with other parts
-                bufferFileQueue.Enqueue(pathMerged);
+                bufferFiles = bufferFiles
+                    .Concat(await Task.WhenAll(tasks))
+                    .ToList();
             }
 
-            Console.WriteLine($"Sorted: {bufferFileQueue.Dequeue()}");
+            Console.WriteLine($"Sorted: {bufferFiles[0]}");
         }
 
-        static bool Read(List<Record> records, StreamReader reader, char[] buffer, ref char[] previousReadRest)
+        static bool Read(StreamReader reader, char[] buffer, ref char[] previousReadRest, out List<Record> records)
         {
-            records.Clear();
+            records = new List<Record>();
 
             if (reader.EndOfStream)
             {
@@ -139,10 +101,10 @@ namespace Sort
                 if (buffer[i] == '\r' || buffer[i] == '\n')
                 {
                     records.Add(new Record
-                    {
-                        Num = new Memory<char>(buffer, numIndex, dotIndex - numIndex),
-                        Str = new Memory<char>(buffer, dotIndex, i - dotIndex)
-                    });
+                    (
+                        new Span<char>(buffer, numIndex, dotIndex - numIndex),
+                        new Span<char>(buffer, dotIndex, i - dotIndex)
+                    ));
 
                     numIndex = ++i;
 
@@ -168,13 +130,13 @@ namespace Sort
 
         static void Write(Record record, StreamWriter writer)
         {
-            writer.Write(record.Num.Span);
-            writer.WriteLine(record.Str.Span);
+            writer.Write(record.Num);
+            writer.WriteLine(record.Str);
         }
 
-        static string SortAndSave(List<Record> records, IComparer<Record> comparer, string outputPath)
+        static string SortAndSave(List<Record> records, string outputPath)
         {
-            records.Sort(comparer);
+            records.Sort(_comparer);
 
             var tempPath = Path.Combine(outputPath, Path.GetRandomFileName());
 
@@ -187,6 +149,70 @@ namespace Sort
             }
 
             return tempPath;
+        }
+
+        static string Merge(int bufferSize, string path1, string path2, string outputPath)
+        {
+            var pathMerged = Path.Combine(outputPath, Path.GetRandomFileName());
+
+            using (var fileToMerge1 = File.OpenText(path1))
+            using (var fileToMerge2 = File.OpenText(path2))
+            using (var fileMerged = new StreamWriter(pathMerged, false, Encoding.UTF8, 65536))
+            {
+                var buffer1 = new char[bufferSize];
+                var buffer2 = new char[bufferSize];
+                var rest1 = new char[0];
+                var rest2 = new char[0];
+
+                Read(fileToMerge1, buffer1, ref rest1, out var records1);
+                Read(fileToMerge2, buffer2, ref rest2, out var records2);
+
+                var enumerator1 = records1.GetEnumerator();
+                var enumerator2 = records2.GetEnumerator();
+
+                enumerator1.MoveNext();
+                enumerator2.MoveNext();
+
+                while (enumerator1.Current != null || enumerator2.Current != null)
+                {
+                    var comparisonResult = _comparer.Compare(enumerator1.Current, enumerator2.Current);
+                    if (comparisonResult < 0)
+                    {
+                        Write(enumerator1.Current, fileMerged);
+                        enumerator1.MoveNext();
+                    }
+                    else if (comparisonResult == 0)
+                    {
+                        Write(enumerator1.Current, fileMerged);
+                        Write(enumerator2.Current, fileMerged);
+                        enumerator1.MoveNext();
+                        enumerator2.MoveNext();
+                    }
+                    else
+                    {
+                        Write(enumerator2.Current, fileMerged);
+                        enumerator2.MoveNext();
+                    }
+
+                    if (enumerator1.Current == null && Read(fileToMerge1, buffer1, ref rest1, out records1))
+                    {
+                        enumerator1 = records1.GetEnumerator();
+                        enumerator1.MoveNext();
+                    }
+
+                    if (enumerator2.Current == null && Read(fileToMerge2, buffer2, ref rest2, out records2))
+                    {
+                        enumerator2 = records2.GetEnumerator();
+                        enumerator2.MoveNext();
+                    }
+                }
+            }
+
+            // delete processed buffer files
+            File.Delete(path1);
+            File.Delete(path2);
+
+            return pathMerged;
         }
     }
 }

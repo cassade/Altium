@@ -4,16 +4,16 @@ $generatorDictionary = "Words.txt"
 $unsortedFilePath = "1Gb_unsorted.txt"
 $unsortedFileSize = 1024 * 1024 * 1024
 $bufferSize = 1024 * 1024 * 64
-$bufferPath= "."
+$outputPath= "./1Gb"
 
 $Time = [System.Diagnostics.Stopwatch]::StartNew()
 
-# dotnet ../bin/Generator.dll $unsortedFilePath $unsortedFileSize $generatorDictionary
+dotnet ../bin/Generator.dll $unsortedFilePath $unsortedFileSize $generatorDictionary
 
 $GenerationTime = $Time.Elapsed
 write-host $([string]::Format("`rGeneration time: {0:d2}:{1:d2}:{2:d2}.{3:d3}", $GenerationTime.hours, $GenerationTime.minutes, $GenerationTime.seconds, $GenerationTime.milliseconds))
 
-dotnet ../bin/Sort.dll $unsortedFilePath $bufferPath $bufferSize
+dotnet ../bin/Sort.dll $unsortedFilePath $outputPath $bufferSize
 
 $TotalTime = $Time.Elapsed
 $SortingTime = $TotalTime - $GenerationTime

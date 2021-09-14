@@ -2,9 +2,16 @@ using System;
 
 namespace Sort
 {
-    public record Record
+    public class Record
     {
-        public Memory<char> Num { get; init; }
-        public Memory<char> Str { get; init; }
+        public Record(Span<char> num, Span<char> str)
+        {
+            Num = num.ToString();
+            Str = str.ToString();
+        }
+
+        public int? NumValue { get; set; }
+        public string Num { get; }
+        public string Str { get; }
     }
 }

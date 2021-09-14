@@ -16,10 +16,13 @@ namespace Sort
             if (x == null && y != null)
                 return 1;
 
-            var result = x.Str.Span.SequenceCompareTo(y.Str.Span);
+            var result = StringComparer.Ordinal.Compare(x.Str, y.Str);
             if (result == 0)
             {
-                result = int.Parse(x.Num.Span).CompareTo(int.Parse(y.Num.Span));
+                x.NumValue = x.NumValue ?? int.Parse(x.Num);
+                y.NumValue = y.NumValue ?? int.Parse(y.Num);
+
+                result = x.NumValue.Value.CompareTo(y.NumValue.Value);
             }
 
             return result;
